@@ -1,0 +1,11 @@
+## Interface: 30300
+## Title: |cff00ff00TradeSkillMaster_TradeChat|r
+## Notes: Automated periodic chat messages for trade advertising.
+## Author: Gemlatune
+## Version: 1.0
+## Dependencies: TradeSkillMaster
+## SavedVariables: AscensionTSM_TradeChatDB
+
+Locale\enUS.lua
+
+TradeSkillMaster_TradeChat.lua
