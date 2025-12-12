@@ -10,10 +10,16 @@ TSM = LibStub("AceAddon-3.0"):NewAddon(TSM, "TSM_TradeChat", "AceEvent-3.0", "Ac
 local AceGUI = LibStub("AceGUI-3.0")
 local L = LibStub("AceLocale-3.0"):GetLocale("TradeSkillMaster_TradeChat")
 
+-- Constants
+local MODE_ONE_MESSAGE = "one"
+local MODE_ALL_MESSAGES = "all"
+local MAX_MESSAGES_ALL_MODE = 10
+
 -- Default saved variables
 local savedDBDefaults = {
 	profile = {
 		cooldown = 60, -- seconds between messages
+		mode = MODE_ONE_MESSAGE, -- "one" or "all"
 		messages = {}, -- list of messages { text = "/trade message" }
 		messagesSent = 0,
 	},
@@ -48,7 +54,7 @@ end
 
 function TSM:RegisterModule()
 	TSM.icons = {
-		{ side = "module", desc = "TradeChat", slashCommand = "tradechat", callback = "Config:Load", icon = "Interface\\Icons\\INV_Letter_15" },
+		{ side = "module", desc = "TradeChat", callback = "Config:Load", icon = "Interface\\Icons\\INV_Letter_15" },
 	}
 
 	TSM.slashCommands = {
@@ -127,19 +133,77 @@ function TSM:SendNextMessage()
 		return
 	end
 
-	-- Wrap around if needed
-	if TSM.currentIndex > #messages then
-		TSM.currentIndex = 1
+	if TSM.db.profile.mode == MODE_ALL_MESSAGES then
+		TSM:SendAllMessages()
+	else
+		TSM:SendOneMessage()
+	end
+end
+
+function TSM:SendOneMessage()
+	local messages = TSM.db.profile.messages
+
+	-- Find next enabled message
+	local startIndex = TSM.currentIndex
+	local found = false
+	repeat
+		-- Wrap around if needed
+		if TSM.currentIndex > #messages then
+			TSM.currentIndex = 1
+		end
+
+		local messageData = messages[TSM.currentIndex]
+		if messageData and messageData.text and messageData.enabled ~= false then
+			TSM:SendChatMessage(messageData.text)
+			TSM.db.profile.messagesSent = TSM.db.profile.messagesSent + 1
+			found = true
+		end
+
+		TSM.currentIndex = TSM.currentIndex + 1
+
+		-- Prevent infinite loop if all messages are disabled
+		if TSM.currentIndex > #messages then
+			TSM.currentIndex = 1
+		end
+		if TSM.currentIndex == startIndex and not found then
+			TSM:Print(L["No messages configured. Add messages first."])
+			TSM:Stop()
+			return
+		end
+	until found
+end
+
+function TSM:SendAllMessages()
+	local messages = TSM.db.profile.messages
+
+	-- Count enabled messages
+	local enabledCount = 0
+	for _, msgData in ipairs(messages) do
+		if msgData.enabled ~= false then
+			enabledCount = enabledCount + 1
+		end
 	end
 
-	local messageData = messages[TSM.currentIndex]
-	if messageData and messageData.text then
-		TSM:SendChatMessage(messageData.text)
-		TSM.db.profile.messagesSent = TSM.db.profile.messagesSent + 1
-		TSM:Print(format(L["Sent: %s"], messageData.text))
+	if enabledCount == 0 then
+		TSM:Print(L["No messages configured. Add messages first."])
+		TSM:Stop()
+		return
 	end
 
-	TSM.currentIndex = TSM.currentIndex + 1
+	-- Check max limit
+	if enabledCount > MAX_MESSAGES_ALL_MODE then
+		TSM:Print(format(L["Warning: Too many messages (%d). Maximum is 10 for 'All messages at once' mode."], enabledCount))
+		TSM:Stop()
+		return
+	end
+
+	-- Send all enabled messages
+	for _, msgData in ipairs(messages) do
+		if msgData.text and msgData.enabled ~= false then
+			TSM:SendChatMessage(msgData.text)
+			TSM.db.profile.messagesSent = TSM.db.profile.messagesSent + 1
+		end
+	end
 end
 
 function TSM:SendChatMessage(text)
@@ -202,9 +266,18 @@ function TSM:AddMessage(text)
 		return false
 	end
 
-	tinsert(TSM.db.profile.messages, { text = text })
+	tinsert(TSM.db.profile.messages, { text = text, enabled = true })
 	TSM:Print(format(L["Message added: %s"], text))
 	return true
+end
+
+function TSM:ToggleMessage(index)
+	if index > 0 and index <= #TSM.db.profile.messages then
+		local msg = TSM.db.profile.messages[index]
+		msg.enabled = not (msg.enabled ~= false)
+		return true
+	end
+	return false
 end
 
 function TSM:DeleteMessage(index)
@@ -452,24 +525,40 @@ function Config:DrawSettings(container)
 				{
 					type = "Spacer",
 				},
-				-- Cooldown Setting
+				-- Cooldown and Mode Settings
 				{
 					type = "InlineGroup",
 					layout = "flow",
 					title = L["Cooldown (seconds)"],
 					children = {
 						{
-							type = "Slider",
+							type = "EditBox",
 							label = L["Cooldown (seconds)"],
-							min = 10,
-							max = 600,
-							step = 5,
-							value = TSM.db.profile.cooldown,
-							relativeWidth = 0.8,
-							callback = function(_, _, value)
-								TSM.db.profile.cooldown = value
+							value = tostring(TSM.db.profile.cooldown),
+							relativeWidth = 0.15,
+							callback = function(widget, _, value)
+								local num = tonumber(value)
+								if num and num >= 1 then
+									TSM.db.profile.cooldown = num
+								else
+									widget:SetText(tostring(TSM.db.profile.cooldown))
+								end
 							end,
 							tooltip = L["Time between each message in seconds."],
+						},
+						{
+							type = "Dropdown",
+							label = L["Mode"],
+							list = {
+								[MODE_ONE_MESSAGE] = L["One message per cooldown"],
+								[MODE_ALL_MESSAGES] = L["All messages at once"],
+							},
+							value = TSM.db.profile.mode,
+							relativeWidth = 0.35,
+							callback = function(_, _, value)
+								TSM.db.profile.mode = value
+								Config:RefreshSettings()
+							end,
 						},
 					},
 				},
@@ -495,21 +584,15 @@ function Config:DrawSettings(container)
 						{
 							type = "EditBox",
 							label = L["Enter your message (with channel prefix like /trade, /say, /p):"],
-							relativeWidth = 0.7,
+							relativeWidth = 1,
+							value = Config.pendingCopyText or "",
 							callback = function(widget, _, value)
 								if value and value ~= "" then
 									TSM:AddMessage(value)
 									widget:SetText("")
+									Config.pendingCopyText = nil
 									Config:RefreshSettings()
 								end
-							end,
-						},
-						{
-							type = "Button",
-							text = L["Add"],
-							relativeWidth = 0.2,
-							callback = function()
-								-- The EditBox callback handles adding
 							end,
 						},
 					},
@@ -533,40 +616,58 @@ function Config:GetMessageWidgets()
 		return children
 	end
 
+	-- Count enabled messages and show warning if too many for "all" mode
+	if TSM.db.profile.mode == MODE_ALL_MESSAGES then
+		local enabledCount = 0
+		for _, msgData in ipairs(messages) do
+			if msgData.enabled ~= false then
+				enabledCount = enabledCount + 1
+			end
+		end
+		if enabledCount > MAX_MESSAGES_ALL_MODE then
+			tinsert(children, {
+				type = "Label",
+				text = "|cffff0000" .. format(L["Warning: Too many messages (%d). Maximum is 10 for 'All messages at once' mode."], enabledCount) .. "|r",
+				relativeWidth = 1,
+			})
+		end
+	end
+
 	for i, msgData in ipairs(messages) do
-		-- Message text
+		local isEnabled = msgData.enabled ~= false
+		-- Enabled checkbox
 		tinsert(children, {
-			type = "Label",
-			text = format("|cffffffff%d.|r %s", i, msgData.text),
-			relativeWidth = 0.6,
-		})
-		-- Move Up button
-		tinsert(children, {
-			type = "Button",
-			text = "^",
-			relativeWidth = 0.1,
-			disabled = (i == 1),
+			type = "CheckBox",
+			label = "",
+			value = isEnabled,
+			relativeWidth = 0.06,
 			callback = function()
-				TSM:MoveMessageUp(i)
+				TSM:ToggleMessage(i)
 				Config:RefreshSettings()
 			end,
 		})
-		-- Move Down button
+		-- Message text (grayed out if disabled)
+		local textColor = isEnabled and "|cffffffff" or "|cff666666"
+		tinsert(children, {
+			type = "Label",
+			text = format("%s%d. %s|r", textColor, i, msgData.text),
+			relativeWidth = 0.78,
+		})
+		-- Copy button
 		tinsert(children, {
 			type = "Button",
-			text = "v",
-			relativeWidth = 0.1,
-			disabled = (i == #messages),
+			text = L["Copy"],
+			relativeWidth = 0.08,
 			callback = function()
-				TSM:MoveMessageDown(i)
+				Config.pendingCopyText = msgData.text
 				Config:RefreshSettings()
 			end,
 		})
 		-- Delete button
 		tinsert(children, {
 			type = "Button",
-			text = "X",
-			relativeWidth = 0.1,
+			text = L["Delete"],
+			relativeWidth = 0.08,
 			callback = function()
 				TSM:DeleteMessage(i)
 				Config:RefreshSettings()

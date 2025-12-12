@@ -16,12 +16,17 @@ L["Use channel prefixes like /trade, /say, /yell, /p, /g, /1, /2, etc."] = "Use 
 -- Settings
 L["Cooldown (seconds)"] = "Cooldown (seconds)"
 L["Time between each message in seconds."] = "Time between each message in seconds."
+L["Mode"] = "Mode"
+L["One message per cooldown"] = "One message per cooldown"
+L["All messages at once"] = "All messages at once"
+L["Warning: Too many messages (%d). Maximum is 10 for 'All messages at once' mode."] = "Warning: Too many messages (%d). Maximum is 10 for 'All messages at once' mode."
 L["Messages"] = "Messages"
 L["Add Message"] = "Add Message"
 L["Enter your message (with channel prefix like /trade, /say, /p):"] = "Enter your message (with channel prefix like /trade, /say, /p):"
 L["Add"] = "Add"
 L["Cancel"] = "Cancel"
 L["Delete"] = "Delete"
+L["Copy"] = "Copy"
 L["Move Up"] = "Move Up"
 L["Move Down"] = "Move Down"
 
