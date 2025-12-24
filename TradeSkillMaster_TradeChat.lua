@@ -13,15 +13,30 @@ local L = LibStub("AceLocale-3.0"):GetLocale("TradeSkillMaster_TradeChat")
 -- Constants
 local MODE_ONE_MESSAGE = "one"
 local MODE_ALL_MESSAGES = "all"
+local MODE_ITEM_LIST = "itemlist"
 local MAX_MESSAGES_ALL_MODE = 10
+
+-- Price format constants
+local PRICE_FORMAT_ROUND_GOLD = "roundgold"
+local PRICE_FORMAT_GOLD_SILVER = "goldsilver"
+local PRICE_FORMAT_NONE = "none"
 
 -- Default saved variables
 local savedDBDefaults = {
 	profile = {
 		cooldown = 60, -- seconds between messages
-		mode = MODE_ONE_MESSAGE, -- "one" or "all"
+		mode = MODE_ONE_MESSAGE, -- "one", "all", or "itemlist"
 		messages = {}, -- list of messages { text = "/trade message" }
 		messagesSent = 0,
+		-- Item list mode settings
+		itemListConfig = {
+			prefix = "WTS:",
+			suffix = "PST!",
+			itemsPerMessage = 2, -- 1, 2, or 3
+			priceFormat = PRICE_FORMAT_GOLD_SILVER, -- "roundgold", "goldsilver", "none"
+			channel = "/trade",
+		},
+		itemList = {}, -- { {link="...", price=12345, name="..."}, ... }
 	},
 }
 
@@ -50,6 +65,9 @@ function TSM:OnInitialize()
 
 	-- Register module with TSM
 	TSM:RegisterModule()
+
+	-- Expose globally for inter-addon communication (used by AuctionsTab)
+	TSM_TradeChat = TSM
 end
 
 function TSM:RegisterModule()
@@ -94,9 +112,17 @@ function TSM:Start()
 		return false
 	end
 
-	if #TSM.db.profile.messages == 0 then
-		TSM:Print(L["No messages configured. Add messages first."])
-		return false
+	-- Validate based on mode
+	if TSM.db.profile.mode == MODE_ITEM_LIST then
+		if #TSM.db.profile.itemList == 0 then
+			TSM:Print(L["No items in the list. Add items first."])
+			return false
+		end
+	else
+		if #TSM.db.profile.messages == 0 then
+			TSM:Print(L["No messages configured. Add messages first."])
+			return false
+		end
 	end
 
 	TSM.isRunning = true
@@ -127,15 +153,21 @@ function TSM:Stop()
 end
 
 function TSM:SendNextMessage()
-	local messages = TSM.db.profile.messages
-	if #messages == 0 then
-		TSM:Stop()
-		return
-	end
-
-	if TSM.db.profile.mode == MODE_ALL_MESSAGES then
+	if TSM.db.profile.mode == MODE_ITEM_LIST then
+		TSM:SendItemListMessage()
+	elseif TSM.db.profile.mode == MODE_ALL_MESSAGES then
+		local messages = TSM.db.profile.messages
+		if #messages == 0 then
+			TSM:Stop()
+			return
+		end
 		TSM:SendAllMessages()
 	else
+		local messages = TSM.db.profile.messages
+		if #messages == 0 then
+			TSM:Stop()
+			return
+		end
 		TSM:SendOneMessage()
 	end
 end
@@ -204,6 +236,109 @@ function TSM:SendAllMessages()
 			TSM.db.profile.messagesSent = TSM.db.profile.messagesSent + 1
 		end
 	end
+end
+
+-- Format price based on configured format
+local function FormatItemPrice(copper, priceFormat)
+	if not copper or copper == 0 or priceFormat == PRICE_FORMAT_NONE then
+		return nil
+	end
+
+	local gold = math.floor(copper / 10000)
+	local silver = math.floor((copper % 10000) / 100)
+
+	if priceFormat == PRICE_FORMAT_ROUND_GOLD then
+		-- Round to nearest gold
+		if silver >= 50 then
+			gold = gold + 1
+		end
+		return format("%dg", gold)
+	else -- PRICE_FORMAT_GOLD_SILVER
+		-- Gold and silver, round copper
+		local copperRem = copper % 100
+		if copperRem >= 50 then
+			silver = silver + 1
+			if silver >= 100 then
+				gold = gold + 1
+				silver = 0
+			end
+		end
+		if gold > 0 then
+			return format("%dg%ds", gold, silver)
+		else
+			return format("%ds", silver)
+		end
+	end
+end
+
+-- Select N random items from the list
+local function SelectRandomItems(items, count)
+	if #items <= count then
+		return items
+	end
+
+	-- Create a copy of indices and shuffle
+	local indices = {}
+	for i = 1, #items do
+		indices[i] = i
+	end
+
+	-- Fisher-Yates shuffle (partial, just enough for count items)
+	for i = 1, count do
+		local j = math.random(i, #items)
+		indices[i], indices[j] = indices[j], indices[i]
+	end
+
+	-- Collect selected items
+	local selected = {}
+	for i = 1, count do
+		tinsert(selected, items[indices[i]])
+	end
+	return selected
+end
+
+function TSM:SendItemListMessage()
+	local config = TSM.db.profile.itemListConfig
+	local items = TSM.db.profile.itemList
+
+	if #items == 0 then
+		TSM:Print(L["No items in the list. Add items first."])
+		TSM:Stop()
+		return
+	end
+
+	-- Select random items
+	local selected = SelectRandomItems(items, config.itemsPerMessage)
+
+	-- Build item parts
+	local parts = {}
+	for _, item in ipairs(selected) do
+		local text = item.link or item.name or "Unknown"
+		local priceStr = FormatItemPrice(item.price, config.priceFormat)
+		if priceStr then
+			text = text .. " " .. priceStr
+		end
+		tinsert(parts, text)
+	end
+
+	-- Build full message
+	local itemsText = table.concat(parts, ", ")
+	local prefix = config.prefix or ""
+	local suffix = config.suffix or ""
+
+	-- Add spaces if prefix/suffix are not empty
+	if prefix ~= "" and not prefix:match("%s$") then
+		prefix = prefix .. " "
+	end
+	if suffix ~= "" and not suffix:match("^%s") then
+		suffix = " " .. suffix
+	end
+
+	local fullMessage = prefix .. itemsText .. suffix
+
+	-- Send via the configured channel
+	TSM:SendChatMessage(config.channel .. " " .. fullMessage)
+	TSM.db.profile.messagesSent = TSM.db.profile.messagesSent + 1
 end
 
 function TSM:SendChatMessage(text)
@@ -306,6 +441,64 @@ function TSM:MoveMessageDown(index)
 	if index >= 1 and index < #TSM.db.profile.messages then
 		local messages = TSM.db.profile.messages
 		messages[index], messages[index + 1] = messages[index + 1], messages[index]
+		return true
+	end
+	return false
+end
+
+-- ============================================================================
+-- Item List Public API (for inter-addon communication)
+-- ============================================================================
+
+local function ItemExistsInList(name)
+	for _, item in ipairs(TSM.db.profile.itemList) do
+		if item.name == name then
+			return true
+		end
+	end
+	return false
+end
+
+-- Add items to the item list (FUSION behavior - merges with existing, ignores duplicates)
+-- @param items table - Array of {link, price, name}
+-- @return number - Number of items actually added
+function TSM:AddItems(items)
+	local added = 0
+	for _, item in ipairs(items) do
+		if item.name and not ItemExistsInList(item.name) then
+			tinsert(TSM.db.profile.itemList, {
+				link = item.link,
+				price = item.price,
+				name = item.name,
+			})
+			added = added + 1
+		end
+	end
+	-- Refresh UI if visible
+	if TSM.Config and TSM.Config.settingsContainer then
+		TSM.Config:RefreshSettings()
+	end
+	return added
+end
+
+-- Clear all items from the item list
+function TSM:ClearItems()
+	wipe(TSM.db.profile.itemList)
+	-- Refresh UI if visible
+	if TSM.Config and TSM.Config.settingsContainer then
+		TSM.Config:RefreshSettings()
+	end
+end
+
+-- Get the number of items in the list
+function TSM:GetItemCount()
+	return #TSM.db.profile.itemList
+end
+
+-- Delete a single item from the list by index
+function TSM:DeleteItem(index)
+	if index > 0 and index <= #TSM.db.profile.itemList then
+		tremove(TSM.db.profile.itemList, index)
 		return true
 	end
 	return false
@@ -462,145 +655,397 @@ end
 function Config:DrawSettings(container)
 	Config.settingsContainer = container
 
+	-- Build base children
+	local children = {
+		-- Status and Controls
+		{
+			type = "InlineGroup",
+			layout = "flow",
+			title = L["Status"],
+			children = {
+				{
+					type = "Label",
+					text = L["Status"] .. ": ",
+					relativeWidth = 0.15,
+				},
+				{
+					type = "Label",
+					text = TSM.isRunning and "|cff00ff00" .. L["Running"] .. "|r" or "|cffff0000" .. L["Stopped"] .. "|r",
+					relativeWidth = 0.25,
+					callback = function(widget)
+						Config.statusLabels.status = widget
+					end,
+				},
+				{
+					type = "Label",
+					text = L["Messages Sent"] .. ": ",
+					relativeWidth = 0.2,
+				},
+				{
+					type = "Label",
+					text = tostring(TSM.db.profile.messagesSent),
+					relativeWidth = 0.15,
+					callback = function(widget)
+						Config.statusLabels.sent = widget
+					end,
+				},
+				{
+					type = "Label",
+					text = TSM.isRunning and (L["Next message in"] .. ": " .. math.ceil(TSM.timeUntilNext) .. "s") or "",
+					relativeWidth = 0.25,
+					callback = function(widget)
+						Config.statusLabels.next = widget
+					end,
+				},
+				{
+					type = "Button",
+					text = TSM.isRunning and L["Stop"] or L["Start"],
+					relativeWidth = 0.3,
+					callback = function(widget)
+						if TSM.isRunning then
+							TSM:Stop()
+						else
+							TSM:Start()
+						end
+						Config:RefreshSettings()
+					end,
+				},
+			},
+		},
+		{
+			type = "Spacer",
+		},
+		-- Cooldown and Mode Settings
+		{
+			type = "InlineGroup",
+			layout = "flow",
+			title = L["Cooldown (seconds)"],
+			children = {
+				{
+					type = "EditBox",
+					label = L["Cooldown (seconds)"],
+					value = tostring(TSM.db.profile.cooldown),
+					relativeWidth = 0.15,
+					callback = function(widget, _, value)
+						local num = tonumber(value)
+						if num and num >= 1 then
+							TSM.db.profile.cooldown = num
+						else
+							widget:SetText(tostring(TSM.db.profile.cooldown))
+						end
+					end,
+					tooltip = L["Time between each message in seconds."],
+				},
+				{
+					type = "Dropdown",
+					label = L["Mode"],
+					list = {
+						[MODE_ONE_MESSAGE] = L["One message per cooldown"],
+						[MODE_ALL_MESSAGES] = L["All messages at once"],
+						[MODE_ITEM_LIST] = L["Item list"],
+					},
+					value = TSM.db.profile.mode,
+					relativeWidth = 0.35,
+					callback = function(_, _, value)
+						TSM.db.profile.mode = value
+						Config:RefreshSettings()
+					end,
+				},
+			},
+		},
+		{
+			type = "Spacer",
+		},
+	}
+
+	-- Add mode-specific widgets
+	local modeWidgets = Config:GetModeSpecificWidgets()
+	for _, widget in ipairs(modeWidgets) do
+		tinsert(children, widget)
+	end
+
 	local page = {
 		{
 			type = "ScrollFrame",
 			layout = "List",
+			children = children,
+		},
+	}
+	TSMAPI:BuildPage(container, page)
+end
+
+-- Returns widgets based on current mode
+function Config:GetModeSpecificWidgets()
+	if TSM.db.profile.mode == MODE_ITEM_LIST then
+		return Config:GetItemListWidgets()
+	else
+		return {
+			-- Messages List
+			{
+				type = "InlineGroup",
+				layout = "flow",
+				title = L["Messages"],
+				children = Config:GetMessageWidgets(),
+			},
+			{
+				type = "Spacer",
+			},
+			-- Add Message
+			{
+				type = "InlineGroup",
+				layout = "flow",
+				title = L["Add Message"],
+				children = {
+					{
+						type = "EditBox",
+						label = L["Enter your message (with channel prefix like /trade, /say, /p):"],
+						relativeWidth = 1,
+						value = Config.pendingCopyText or "",
+						callback = function(widget, _, value)
+							if value and value ~= "" then
+								TSM:AddMessage(value)
+								widget:SetText("")
+								Config.pendingCopyText = nil
+								Config:RefreshSettings()
+							end
+						end,
+					},
+				},
+			},
+		}
+	end
+end
+
+-- Returns widgets for Item List mode
+function Config:GetItemListWidgets()
+	local config = TSM.db.profile.itemListConfig
+	local items = TSM.db.profile.itemList
+
+	return {
+		-- Item List Settings
+		{
+			type = "InlineGroup",
+			layout = "flow",
+			title = L["Item List Settings"],
 			children = {
-				-- Status and Controls
 				{
-					type = "InlineGroup",
-					layout = "flow",
-					title = L["Status"],
-					children = {
-						{
-							type = "Label",
-							text = L["Status"] .. ": ",
-							relativeWidth = 0.15,
-						},
-						{
-							type = "Label",
-							text = TSM.isRunning and "|cff00ff00" .. L["Running"] .. "|r" or "|cffff0000" .. L["Stopped"] .. "|r",
-							relativeWidth = 0.25,
-							callback = function(widget)
-								Config.statusLabels.status = widget
-							end,
-						},
-						{
-							type = "Label",
-							text = L["Messages Sent"] .. ": ",
-							relativeWidth = 0.2,
-						},
-						{
-							type = "Label",
-							text = tostring(TSM.db.profile.messagesSent),
-							relativeWidth = 0.15,
-							callback = function(widget)
-								Config.statusLabels.sent = widget
-							end,
-						},
-						{
-							type = "Label",
-							text = TSM.isRunning and (L["Next message in"] .. ": " .. math.ceil(TSM.timeUntilNext) .. "s") or "",
-							relativeWidth = 0.25,
-							callback = function(widget)
-								Config.statusLabels.next = widget
-							end,
-						},
-						{
-							type = "Button",
-							text = TSM.isRunning and L["Stop"] or L["Start"],
-							relativeWidth = 0.3,
-							callback = function(widget)
-								if TSM.isRunning then
-									TSM:Stop()
-								else
-									TSM:Start()
-								end
-								Config:RefreshSettings()
-							end,
-						},
+					type = "EditBox",
+					label = L["Prefix"],
+					value = config.prefix,
+					relativeWidth = 0.3,
+					callback = function(widget, _, value)
+						config.prefix = value or ""
+					end,
+					tooltip = L["Text before the item links (e.g., 'WTS:')"],
+				},
+				{
+					type = "EditBox",
+					label = L["Suffix"],
+					value = config.suffix,
+					relativeWidth = 0.3,
+					callback = function(widget, _, value)
+						config.suffix = value or ""
+					end,
+					tooltip = L["Text after the item links (e.g., 'PST!')"],
+				},
+				{
+					type = "EditBox",
+					label = L["Channel"],
+					value = config.channel,
+					relativeWidth = 0.2,
+					callback = function(widget, _, value)
+						config.channel = value or "/trade"
+					end,
+					tooltip = L["Channel to send messages (e.g., /trade, /say, /yell)"],
+				},
+				{
+					type = "Dropdown",
+					label = L["Items per message"],
+					list = {
+						[1] = "1",
+						[2] = "2",
+						[3] = "3",
 					},
+					value = config.itemsPerMessage,
+					relativeWidth = 0.15,
+					callback = function(_, _, value)
+						config.itemsPerMessage = value
+					end,
 				},
 				{
-					type = "Spacer",
-				},
-				-- Cooldown and Mode Settings
-				{
-					type = "InlineGroup",
-					layout = "flow",
-					title = L["Cooldown (seconds)"],
-					children = {
-						{
-							type = "EditBox",
-							label = L["Cooldown (seconds)"],
-							value = tostring(TSM.db.profile.cooldown),
-							relativeWidth = 0.15,
-							callback = function(widget, _, value)
-								local num = tonumber(value)
-								if num and num >= 1 then
-									TSM.db.profile.cooldown = num
-								else
-									widget:SetText(tostring(TSM.db.profile.cooldown))
-								end
-							end,
-							tooltip = L["Time between each message in seconds."],
-						},
-						{
-							type = "Dropdown",
-							label = L["Mode"],
-							list = {
-								[MODE_ONE_MESSAGE] = L["One message per cooldown"],
-								[MODE_ALL_MESSAGES] = L["All messages at once"],
-							},
-							value = TSM.db.profile.mode,
-							relativeWidth = 0.35,
-							callback = function(_, _, value)
-								TSM.db.profile.mode = value
-								Config:RefreshSettings()
-							end,
-						},
+					type = "Dropdown",
+					label = L["Price format"],
+					list = {
+						[PRICE_FORMAT_ROUND_GOLD] = L["Round to gold"],
+						[PRICE_FORMAT_GOLD_SILVER] = L["Gold and silver"],
+						[PRICE_FORMAT_NONE] = L["No price"],
 					},
+					value = config.priceFormat,
+					relativeWidth = 0.25,
+					callback = function(_, _, value)
+						config.priceFormat = value
+					end,
+				},
+			},
+		},
+		{
+			type = "Spacer",
+		},
+		-- Item List Table
+		{
+			type = "InlineGroup",
+			layout = "flow",
+			title = L["Item List"] .. " (" .. #items .. " " .. L["items"] .. ")",
+			children = Config:GetItemListTableWidgets(),
+		},
+		{
+			type = "Spacer",
+		},
+		-- Add Item Section
+		{
+			type = "InlineGroup",
+			layout = "flow",
+			title = L["Add Item"],
+			children = {
+				{
+					type = "EditBox",
+					label = L["Item link (Shift+Click item)"],
+					relativeWidth = 0.5,
+					value = Config.pendingItemLink or "",
+					callback = function(widget, _, value)
+						Config.pendingItemLink = value
+					end,
 				},
 				{
-					type = "Spacer",
+					type = "EditBox",
+					label = L["Price (copper, optional)"],
+					relativeWidth = 0.25,
+					value = Config.pendingItemPrice or "",
+					callback = function(widget, _, value)
+						Config.pendingItemPrice = value
+					end,
 				},
-				-- Messages List
 				{
-					type = "InlineGroup",
-					layout = "flow",
-					title = L["Messages"],
-					children = Config:GetMessageWidgets(),
+					type = "Button",
+					text = L["Add"],
+					relativeWidth = 0.12,
+					callback = function()
+						Config:AddItemFromInput()
+					end,
 				},
 				{
-					type = "Spacer",
-				},
-				-- Add Message
-				{
-					type = "InlineGroup",
-					layout = "flow",
-					title = L["Add Message"],
-					children = {
-						{
-							type = "EditBox",
-							label = L["Enter your message (with channel prefix like /trade, /say, /p):"],
-							relativeWidth = 1,
-							value = Config.pendingCopyText or "",
-							callback = function(widget, _, value)
-								if value and value ~= "" then
-									TSM:AddMessage(value)
-									widget:SetText("")
-									Config.pendingCopyText = nil
-									Config:RefreshSettings()
-								end
-							end,
-						},
-					},
+					type = "Button",
+					text = L["Clear All"],
+					relativeWidth = 0.12,
+					callback = function()
+						TSM:ClearItems()
+						Config:RefreshSettings()
+					end,
 				},
 			},
 		},
 	}
-	TSMAPI:BuildPage(container, page)
+end
+
+-- Returns widgets for each item in the list
+function Config:GetItemListTableWidgets()
+	local children = {}
+	local items = TSM.db.profile.itemList
+
+	if #items == 0 then
+		tinsert(children, {
+			type = "Label",
+			text = L["No items in the list. Add items manually or use the 'Add to TradeChat' button in the AuctionsTab."],
+			relativeWidth = 1,
+		})
+		return children
+	end
+
+	-- Header row
+	tinsert(children, {
+		type = "Label",
+		text = "|cffffd100" .. L["Item"] .. "|r",
+		relativeWidth = 0.5,
+	})
+	tinsert(children, {
+		type = "Label",
+		text = "|cffffd100" .. L["Price"] .. "|r",
+		relativeWidth = 0.35,
+	})
+	tinsert(children, {
+		type = "Label",
+		text = "",
+		relativeWidth = 0.15,
+	})
+
+	-- Item rows
+	for i, item in ipairs(items) do
+		tinsert(children, {
+			type = "Label",
+			text = item.link or item.name or "Unknown",
+			relativeWidth = 0.5,
+		})
+		tinsert(children, {
+			type = "Label",
+			text = item.price and Config:FormatPriceDisplay(item.price) or L["No price"],
+			relativeWidth = 0.35,
+		})
+		tinsert(children, {
+			type = "Button",
+			text = L["Delete"],
+			relativeWidth = 0.15,
+			callback = function()
+				TSM:DeleteItem(i)
+				Config:RefreshSettings()
+			end,
+		})
+	end
+
+	return children
+end
+
+-- Format price for display in the item list
+function Config:FormatPriceDisplay(copper)
+	if not copper or copper == 0 then return L["No price"] end
+	local gold = math.floor(copper / 10000)
+	local silver = math.floor((copper % 10000) / 100)
+	local copperRem = copper % 100
+	if gold > 0 then
+		return format("%dg %ds %dc", gold, silver, copperRem)
+	elseif silver > 0 then
+		return format("%ds %dc", silver, copperRem)
+	else
+		return format("%dc", copperRem)
+	end
+end
+
+-- Add item from manual input
+function Config:AddItemFromInput()
+	local link = Config.pendingItemLink
+	local priceStr = Config.pendingItemPrice
+
+	if not link or link == "" then
+		TSM:Print(L["Please enter an item link."])
+		return
+	end
+
+	-- Extract item name from link
+	local name = link:match("%[(.+)%]")
+	if not name then
+		name = link -- Use the raw input if no link brackets
+	end
+
+	local price = tonumber(priceStr) or nil
+
+	TSM:AddItems({{
+		link = link,
+		price = price,
+		name = name,
+	}})
+
+	Config.pendingItemLink = nil
+	Config.pendingItemPrice = nil
+	Config:RefreshSettings()
 end
 
 function Config:GetMessageWidgets()
