@@ -810,6 +810,8 @@ function Config:GetMessageWidgets()
 		end,
 	})
 
+	tinsert(children, { type = "Spacer" })
+
 	if #messages == 0 then
 		tinsert(children, {
 			type = "Label",
